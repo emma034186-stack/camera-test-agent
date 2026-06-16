@@ -167,14 +167,6 @@ python main.py
 
 ---
 
-## 注意事項
-
-- Port `5001`（macOS AirPlay Receiver 佔用 5000）
-- API Key 請存於 `.env`，不要直接貼在終端機（避免換行截斷）
-- reports.json 上限 20 筆，超過自動刪除最舊的照片與影片
-
----
-
 ## 使用的 AI 模型
 
 | 用途 | 模型 |
