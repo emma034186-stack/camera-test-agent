@@ -653,6 +653,18 @@
               <div class="metric-value" id="metricRes">—</div>
             </div>
             <div class="metric-row">
+              <div class="metric-label">🎯 Resolution Spec</div>
+              <div class="metric-value" id="metricSpec"><span class="badge neutral">—</span></div>
+            </div>
+            <div class="metric-row">
+              <div class="metric-label">🎞️ FPS</div>
+              <div class="metric-value" id="metricFps">—</div>
+            </div>
+            <div class="metric-row">
+              <div class="metric-label">⚡ FPS Spec</div>
+              <div class="metric-value" id="metricFpsSpec"><span class="badge neutral">—</span></div>
+            </div>
+            <div class="metric-row">
               <div class="metric-label">💡 Brightness</div>
               <div class="metric-value" id="metricBright">—</div>
             </div>
@@ -928,14 +940,41 @@
     }
   }
 
+  // ── Live metrics polling ─────────────────────────────────────
+  let metricsInterval = null;
+
+  function startMetricsPoll() {
+    if (metricsInterval) return;
+    metricsInterval = setInterval(updateLiveMetrics, 1000);
+    updateLiveMetrics();
+  }
+
+  function stopMetricsPoll() {
+    clearInterval(metricsInterval);
+    metricsInterval = null;
+    const meta = document.getElementById('previewMeta');
+    meta.style.display = 'none';
+  }
+
+  async function updateLiveMetrics() {
+    try {
+      const res = await fetch('/api/camera/metrics');
+      const m = await res.json();
+      if (m.resolution == null) return;
+      const meta = document.getElementById('previewMeta');
+      meta.textContent = `${m.resolution}  |  ${m.fps} fps  |  亮度 ${m.brightness}`;
+      meta.style.display = 'block';
+    } catch (e) {}
+  }
+
   // ── Camera controls ─────────────────────────────────────────
   async function openCamera() {
     const res = await fetch('/api/camera/open', { method: 'POST' });
-    // 確認攝影機真的開了
     const check = await fetch('/api/camera/status');
     const { open } = await check.json();
     addTestResult('攝影機開啟 / 關閉', open, open ? '攝影機成功開啟' : '開啟後仍未偵測到畫面');
     showToast(open ? '✅ 攝影機已開啟' : '❌ 開啟失敗', open ? 'success' : 'error');
+    if (open) startMetricsPoll();
   }
 
   async function closeCamera() {
@@ -944,6 +983,7 @@
     const { open } = await check.json();
     addTestResult('攝影機開啟 / 關閉', !open, !open ? '攝影機成功關閉' : '關閉指令發送但仍在運作');
     showToast(!open ? '⏹ 攝影機已關閉' : '❌ 關閉失敗', !open ? 'success' : 'error');
+    if (!open) stopMetricsPoll();
   }
 
   async function takePhoto() {
@@ -999,18 +1039,24 @@
   }
 
   // ── Test runner ─────────────────────────────────────────────
+  let TEST_DURATION = 5;
+  fetch('/api/config').then(r => r.json()).then(c => { TEST_DURATION = c.test_duration; });
+
   async function runTest() {
     const btn = document.getElementById('runBtn');
     btn.disabled = true;
     btn.classList.add('loading');
 
-    const steps = ['📷 擷取畫面中...', '🤖 AI 分析中...', '💾 儲存報告中...'];
-    let step = 0;
-    setTestStatus(steps[step]);
-    const stepInterval = setInterval(() => {
-      step = Math.min(step + 1, steps.length - 1);
-      setTestStatus(steps[step]);
-    }, 2000);
+    let elapsed = 0;
+    setTestStatus(`📊 測量中... 0 / ${TEST_DURATION} 秒`);
+    const countInterval = setInterval(() => {
+      elapsed++;
+      if (elapsed < TEST_DURATION) {
+        setTestStatus(`📊 測量中... ${elapsed} / ${TEST_DURATION} 秒`);
+      } else {
+        setTestStatus('🤖 AI 分析中...');
+      }
+    }, 1000);
 
     try {
       const res = await fetch('/api/run-test', { method: 'POST' });
@@ -1018,13 +1064,13 @@
       const data = await res.json();
       updateResults(data);
       await loadReports();
-      addTestResult('預覽畫面（Preview stream）', true, '擷取成功，AI 分析完成');
+      addTestResult('預覽畫面（Preview stream）', true, `${TEST_DURATION} 秒測量完成，AI 分析完成`);
       showToast('✅ 測試完成', 'success');
     } catch (e) {
       addTestResult('預覽畫面（Preview stream）', false, e.message.slice(0, 40));
       showToast('❌ 測試失敗：' + e.message, 'error');
     } finally {
-      clearInterval(stepInterval);
+      clearInterval(countInterval);
       setTestStatus(null);
       btn.disabled = false;
       btn.classList.remove('loading');
@@ -1046,6 +1092,25 @@
       ? '<span class="badge pass">✅ PASS</span>'
       : '<span class="badge fail">❌ FAIL</span>';
     document.getElementById('metricRes').textContent = cam.resolution || '—';
+
+    const specPass = !!cam.resolution_spec;
+    const specLabel = cam.resolution_spec || '不符合規格';
+    document.getElementById('metricSpec').innerHTML = specPass
+      ? `<span class="badge pass">✅ ${specLabel}</span>`
+      : `<span class="badge fail">❌ ${specLabel}</span>`;
+    addTestResult('解析度規格（720p / 1080p / 4K）', specPass,
+      specPass ? `符合 ${specLabel} 規格` : `${cam.resolution} 不符合任何標準規格`);
+
+    const fpsVal = cam.fps != null ? cam.fps : '—';
+    document.getElementById('metricFps').textContent = fpsVal !== '—' ? `${fpsVal} fps` : '—';
+    const fpsSpecPass = !!cam.fps_spec;
+    const fpsSpecLabel = cam.fps_spec || '不符合規格';
+    document.getElementById('metricFpsSpec').innerHTML = fpsSpecPass
+      ? `<span class="badge pass">✅ ${fpsSpecLabel}</span>`
+      : `<span class="badge fail">❌ ${fpsSpecLabel}</span>`;
+    addTestResult('FPS 是否達標（30fps / 60fps）', fpsSpecPass,
+      fpsSpecPass ? `${fpsVal} fps 符合 ${fpsSpecLabel}` : `${fpsVal} fps 不符合任何標準規格`);
+
     document.getElementById('metricBright').textContent =
       `${cam.brightness}  (${ai.brightness?.status || '—'})`;
     document.getElementById('metricCost').textContent = `$${cost.total_usd} USD`;
@@ -1088,6 +1153,15 @@
         ? '<span class="badge pass">✅ PASS</span>'
         : '<span class="badge fail">❌ FAIL</span>';
 
+      const specBadge = cam.resolution_spec
+        ? `<span class="badge pass">✅ ${cam.resolution_spec}</span>`
+        : `<span class="badge fail">❌ 不符合</span>`;
+
+      const fpsBadge = cam.fps_spec
+        ? `<span class="badge pass">✅ ${cam.fps_spec}</span>`
+        : `<span class="badge fail">❌ 不符合</span>`;
+      const fpsDisplay = cam.fps != null ? `${cam.fps} fps` : '—';
+
       const actions = [
         imgFile ? `<a class="action-btn" href="/images/${imgFile}" target="_blank">📷 Photo</a>` : '',
         vidFile ? `<a class="action-btn" href="/videos/${vidFile}" target="_blank">🎥 Video</a>` : '',
@@ -1098,6 +1172,9 @@
         <td class="timestamp-cell">${ts}</td>
         <td>${statusBadge}</td>
         <td>${cam.resolution || '—'}</td>
+        <td>${specBadge}</td>
+        <td>${fpsDisplay}</td>
+        <td>${fpsBadge}</td>
         <td>${cam.brightness || '—'}</td>
         <td>$${cost.total_usd}</td>
         <td><div class="actions">${actions}</div></td>
@@ -1108,7 +1185,8 @@
       <table>
         <thead><tr>
           <th>Snapshot</th><th>Timestamp</th><th>Status</th>
-          <th>Resolution</th><th>Brightness</th><th>Cost</th><th>Files</th>
+          <th>Resolution</th><th>Res Spec</th><th>FPS</th><th>FPS Spec</th>
+          <th>Brightness</th><th>Cost</th><th>Files</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -1123,6 +1201,9 @@
 
   loadChecks();
   loadReports();
+  fetch('/api/camera/status').then(r => r.json()).then(({ open }) => {
+    if (open) startMetricsPoll();
+  });
 </script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 from flask import Flask, render_template, jsonify, send_from_directory, Response
 from datetime import datetime
 from dotenv import load_dotenv
+from collections import deque
 import json
 import os
 import cv2
@@ -26,6 +27,11 @@ class CameraStream:
         self.cap_lock = threading.Lock()
         self.running = False
         self._thread = None
+        self._metrics_lock = threading.Lock()
+        self._frame_times = deque(maxlen=60)
+        self.fps_actual = 0.0
+        self.brightness = 0.0
+        self.resolution = None
 
     def start(self):
         if self.running:
@@ -46,6 +52,11 @@ class CameraStream:
                 self.cap = None
         with self.frame_lock:
             self.frame = None
+        with self._metrics_lock:
+            self._frame_times.clear()
+            self.fps_actual = 0.0
+            self.brightness = 0.0
+            self.resolution = None
 
     def _loop(self):
         while self.running:
@@ -55,12 +66,29 @@ class CameraStream:
                         break
                     ret, frame = self.cap.read()
                 if ret:
+                    now = time.monotonic()
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    with self._metrics_lock:
+                        self._frame_times.append(now)
+                        if len(self._frame_times) >= 2:
+                            elapsed = self._frame_times[-1] - self._frame_times[0]
+                            self.fps_actual = (len(self._frame_times) - 1) / elapsed if elapsed > 0 else 0.0
+                        self.brightness = round(float(cv2.mean(gray)[0]), 2)
+                        self.resolution = f"{frame.shape[1]}x{frame.shape[0]}"
                     with self.frame_lock:
                         self.frame = frame
                 else:
                     time.sleep(0.05)
             except Exception:
                 time.sleep(0.1)
+
+    def get_metrics(self) -> dict:
+        with self._metrics_lock:
+            return {
+                "fps": round(self.fps_actual, 1),
+                "brightness": self.brightness,
+                "resolution": self.resolution,
+            }
 
     def get_frame(self):
         with self.frame_lock:
@@ -156,6 +184,11 @@ class Recorder:
 recorder = Recorder(stream)
 
 
+# ── Test config ───────────────────────────────────────────────────────────────
+
+TEST_DURATION = 5       # 測量秒數
+SAMPLE_INTERVAL = 0.5   # 每次取樣間隔（秒）
+
 # ── Report helpers ────────────────────────────────────────────────────────────
 
 MAX_RECORDS = 20
@@ -175,6 +208,9 @@ def save_report(results, report, cost):
             "opened": results["camera_opened"],
             "frame_captured": results["frame_captured"],
             "resolution": results["resolution"],
+            "resolution_spec": results.get("resolution_spec"),
+            "fps": results.get("fps"),
+            "fps_spec": results.get("fps_spec"),
             "brightness": results["brightness"],
             "image_path": results["image_path"],
             "video_path": results["video_path"],
@@ -257,6 +293,18 @@ def camera_status():
     return jsonify({"open": stream.running})
 
 
+@app.route("/api/camera/metrics")
+def camera_metrics():
+    if not stream.running:
+        return jsonify({"fps": None, "brightness": None, "resolution": None})
+    return jsonify(stream.get_metrics())
+
+
+@app.route("/api/config")
+def get_config():
+    return jsonify({"test_duration": TEST_DURATION})
+
+
 @app.route("/api/record/start", methods=["POST"])
 def record_start():
     path = recorder.start()
@@ -304,11 +352,33 @@ def take_photo():
 def run_test():
     import traceback
     try:
-        frame = stream.get_frame()
-        if frame is None:
+        if not stream.running or stream.get_frame() is None:
             return jsonify({"error": ["攝影機尚未就緒"]}), 500
 
-        results = process_frame(frame)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔬 開始 {TEST_DURATION} 秒測量")
+        fps_samples = []
+        brightness_samples = []
+        deadline = time.time() + TEST_DURATION
+
+        while time.time() < deadline:
+            m = stream.get_metrics()
+            if m["fps"] and m["fps"] > 0:
+                fps_samples.append(m["fps"])
+            if m["brightness"] is not None:
+                brightness_samples.append(m["brightness"])
+            time.sleep(SAMPLE_INTERVAL)
+
+        frame = stream.get_frame()
+        if frame is None:
+            return jsonify({"error": ["測量結束後攝影機已關閉"]}), 500
+
+        avg_fps = round(sum(fps_samples) / len(fps_samples), 1) if fps_samples else 0.0
+        avg_brightness = round(sum(brightness_samples) / len(brightness_samples), 2) if brightness_samples else 0.0
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 📊 取樣 {len(fps_samples)} 次 → avg fps={avg_fps}, avg brightness={avg_brightness}")
+
+        results = process_frame(frame, avg_fps)
+        results["brightness"] = avg_brightness
+
         report, cost = analyze(results)
         entry = save_report(results, report, cost)
         return jsonify(entry)

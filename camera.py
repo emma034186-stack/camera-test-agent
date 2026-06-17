@@ -7,8 +7,28 @@ from datetime import datetime
 IMAGES_DIR = "images"
 VIDEOS_DIR = "videos"
 
+RESOLUTION_SPECS = {
+    (1280, 720): "720p",
+    (1920, 1080): "1080p",
+    (3840, 2160): "4K",
+}
 
-def process_frame(frame) -> dict:
+FPS_SPECS = [(30, "30fps"), (60, "60fps")]
+FPS_TOLERANCE = 2.0
+
+
+def check_resolution_spec(w: int, h: int) -> str | None:
+    return RESOLUTION_SPECS.get((w, h))
+
+
+def check_fps_spec(fps: float) -> str | None:
+    for target, label in FPS_SPECS:
+        if abs(fps - target) <= FPS_TOLERANCE:
+            return label
+    return None
+
+
+def process_frame(frame, fps: float = 0.0) -> dict:
     """給 CameraStream 使用：直接處理已有的幀，不重新開攝影機"""
     os.makedirs(IMAGES_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -16,11 +36,15 @@ def process_frame(frame) -> dict:
     cv2.imwrite(image_path, frame)
 
     _, buffer = cv2.imencode(".jpg", frame)
+    w, h = frame.shape[1], frame.shape[0]
 
     return {
         "camera_opened": True,
         "frame_captured": True,
-        "resolution": f"{frame.shape[1]}x{frame.shape[0]}",
+        "resolution": f"{w}x{h}",
+        "resolution_spec": check_resolution_spec(w, h),
+        "fps": round(fps, 2),
+        "fps_spec": check_fps_spec(fps),
         "brightness": round(float(cv2.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))[0]), 2),
         "image_path": image_path,
         "video_path": None,
@@ -34,6 +58,9 @@ def capture(camera_index: int = 0, video_duration: float = 3.0) -> dict:
         "camera_opened": False,
         "frame_captured": False,
         "resolution": None,
+        "resolution_spec": None,
+        "fps": None,
+        "fps_spec": None,
         "brightness": None,
         "image_path": None,
         "video_path": None,
@@ -90,6 +117,9 @@ def capture(camera_index: int = 0, video_duration: float = 3.0) -> dict:
 
     results["frame_captured"] = True
     results["resolution"] = f"{width}x{height}"
+    results["resolution_spec"] = check_resolution_spec(width, height)
+    results["fps"] = round(fps, 2)
+    results["fps_spec"] = check_fps_spec(fps)
     results["brightness"] = round(
         float(cv2.mean(cv2.cvtColor(snapshot_frame, cv2.COLOR_BGR2GRAY))[0]), 2
     )
